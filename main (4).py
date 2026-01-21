@@ -2,7 +2,7 @@
 # Python 3.12.3
 
 import dis
-from turtle import width
+#from turtle import width
 import typing
 import copy
 from enum import Enum
@@ -36,7 +36,7 @@ def end(game_state: typing.Dict):
 
 MAX_HEALTH = 100
 WIDTH = HEIGHT = 11
-MAX_DEPTH = 8
+MAX_DEPTH = 11
 
 class Snake:
     def __init__(self, snake):
@@ -302,8 +302,8 @@ class Evaluator:
     
     #ここから追加（最もgood餌を取得する関数）
     def get_best_food(self):
-        MY_DISTANCE_W = 2.0
-        ENEMY_DISTANCE_W = 3.0
+        MY_DISTANCE_W = 4.0
+        ENEMY_DISTANCE_W = 2.0
         WALL_DISTANCE_W = 3.0
 
         #餌の位置を取得
@@ -667,7 +667,7 @@ def move(game_state: typing.Dict) -> typing.Dict:
     print(f"MOVE {game_state['turn']}: {next_move}\n")
     return {"move": next_move}
 
-def choose_best_move(board, my_snake,enemy_snake, evaluater, simulator):
+def choose_best_move(board, my_snake, enemy_snake, evaluater, simulator):
     INF = 10**12
     W_SAFE = 1.0
     W_WIN  = 2.0
@@ -679,8 +679,15 @@ def choose_best_move(board, my_snake,enemy_snake, evaluater, simulator):
     FOOD_W = 0
     HEALTH_LEBEL = 20
     DISTANCE_LEVEL = 5
+    
+    W_WALL_KILL    = 50000.0  # 斜め前
+    W_WALL_STALK   = 40000.0  # 斜め後ろ
+    W_WALL_SQUEEZE = 100000.0 # 真正面からの蓋
+    W_BLOCK_PATH   = 100000.0 # 強制ルート封鎖
+    W_PARALLEL     = 20000.0  # ▼ 追加: 並走
+    
     length_diff = my_snake.length - enemy_snake.length
-    distance,enemy_directions = evaluater.get_enemy_directions()
+    distance, enemy_directions = evaluater.get_enemy_directions()
 
     if length_diff >= 3:
         if my_snake.health > HEALTH_LEBEL:
@@ -698,18 +705,55 @@ def choose_best_move(board, my_snake,enemy_snake, evaluater, simulator):
     if board.turn <= 60:
         FOOD_W = 5000
 
-
     safe_moves, headon_moves, headon_win_moves = evaluater.get_safe_moves()
     reachble_counts = evaluater.asess_reachble_counts()
     food_directions = evaluater.get_food_directions()
     result = simulator.evaluate_first_moves()
+
+    #敵の状況
+    ex, ey = enemy_snake.head['x'], enemy_snake.head['y']
+    edx, edy = 0, 0
+    if enemy_snake.neck:
+        enx, eny = enemy_snake.neck['x'], enemy_snake.neck['y']
+        edx, edy = ex - enx, ey - eny 
+
+    is_enemy_at_wall = (ex == 0 or ex == board.width - 1 or ey == 0 or ey == board.height - 1)
+
+    diag_candidates = []   
+    stalk_candidates = []  
+    forced_target = None
+
+    if edx != 0 or edy != 0:
+        #斜め前の座標計算
+        c1_front = (ex + edx + edy, ey + edy - edx) 
+        c2_front = (ex + edx - edy, ey + edy + edx) 
+        diag_candidates = [c1_front, c2_front]
+
+        #斜め後ろの座標計算
+        c1_back = (ex - edx + edy, ey - edy - edx) 
+        c2_back = (ex - edx - edy, ey - edy + edx) 
+        stalk_candidates = [c1_back, c2_back]
+
+        #敵の前方、左、右の座標計算
+        front_x, front_y = ex + edx, ey + edy
+        side1_x, side1_y = ex - edy, ey + edx
+        side2_x, side2_y = ex + edy, ey - edx
+
+        #前が開いているか、左右がふさがれているか
+        is_front_open = board.check_range(front_x, front_y) and board.is_empty(front_x, front_y)
+        is_side1_blocked = not (board.check_range(side1_x, side1_y) and board.is_empty(side1_x, side1_y))
+        is_side2_blocked = not (board.check_range(side2_x, side2_y) and board.is_empty(side2_x, side2_y))
+
+        #前が開いていて、左右が塞がれているならば、1つ前のマスに必ず行く
+        if is_front_open and is_side1_blocked and is_side2_blocked:
+            forced_target = (front_x, front_y)
 
     scores = {}
 
     for d, s in result.items():
         scores[d] = 0.0
         LOSE_W = 1.0
-
+        
         if s.safe_count == 0 or reachble_counts[d] < MAX_DEPTH:
             scores[d] = -INF
             LOSE_W = 0
@@ -724,9 +768,48 @@ def choose_best_move(board, my_snake,enemy_snake, evaluater, simulator):
                 scores[d] = INF
                 continue
 
+        # # --- 特攻フラグ ---
+        # force_attack = False
+        mx, my = my_snake.head['x'], my_snake.head['y']
+        if d == "U": my += 1
+        elif d == "D": my -= 1
+        elif d == "L": mx -= 1
+        elif d == "R": mx += 1
+
+        # # # 特攻は「自分が大きいとき」限定
+        # # if length_diff > 0:
+        # #     if is_enemy_at_wall:
+        # #         # 壁際正面スクイーズ判定
+        # #         e_on_left   = (ex == 0)
+        # #         e_on_right  = (ex == board.width - 1)
+        # #         e_on_bottom = (ey == 0)
+        # #         e_on_top    = (ey == board.height - 1)
+                
+        # #         if e_on_left and mx == 0 and abs(my - ey) == 1: force_attack = True
+        # #         elif e_on_right and mx == board.width - 1 and abs(my - ey) == 1: force_attack = True
+        # #         elif e_on_bottom and my == 0 and abs(mx - ex) == 1: force_attack = True
+        # #         elif e_on_top and my == board.height - 1 and abs(mx - ex) == 1: force_attack = True
+
+        # #     if forced_target and (mx, my) == forced_target:
+        # #         force_attack = True
+        
+        # # --- 安全チェック ---
+        # if not force_attack:
+        #     # 1. 基本的な死の回避
+        #     if s.safe_count == 0 or reachble_counts[d] < MAX_DEPTH:
+        #         scores[d] = -INF
+        #         continue
+            
+        #     # 2. Headon回避 (自分が小さいときは絶対に避ける)
+        #     if d in headon_moves and d not in headon_win_moves:
+        #         # もしシミュレーションで衝突死が確定しているなら除外
+        #         if s.lose_count > 0:
+        #             scores[d] = -INF // 2
+        #             # continue
+
+        # --- 基本スコア計算 ---
         node = max(1, s.node_count)
 
-        # 生存率系（0〜1）
         safe_rate = safe_div(s.safe_count, node)
         win_rate  = safe_div(s.win_count, node)
         lose_rate = safe_div(s.lose_count, node)
@@ -768,6 +851,53 @@ def choose_best_move(board, my_snake,enemy_snake, evaluater, simulator):
         print(" danger:", danger_score)
         print(" food:", food_score)
         print(" stalking:", stalking_score)
+        # --- ボーナス加算 ---
+
+        # 1. 壁際ボーナス
+        if is_enemy_at_wall:
+            # 斜め前
+            if (mx, my) in diag_candidates:
+                scores[d] += W_WALL_KILL
+                scores[d] += 10000.0
+
+            # 斜め後ろ
+            elif (mx, my) in stalk_candidates:
+                if length_diff > 0: scores[d] += W_WALL_STALK
+            
+
+            # 並走
+            # 敵が壁にいて、自分がその1つ内側にいるとき、敵と同じ方向に進む
+            else:
+                is_parallel = False
+                # 敵が上の壁で左に進んでいる時、自分も左に進む
+                if ey == board.height - 1 and my == board.height - 2 and edx == -1 and d == "L": is_parallel = True
+                # 敵が上の壁で右に進んでいる時、自分も右
+                elif ey == board.height - 1 and my == board.height - 2 and edx == 1 and d == "R": is_parallel = True
+                
+                # 下の壁
+                elif ey == 0 and my == 1 and edx == -1 and d == "L": is_parallel = True
+                elif ey == 0 and my == 1 and edx == 1 and d == "R": is_parallel = True
+                
+                # 左の壁
+                elif ex == 0 and mx == 1 and edy == 1 and d == "U": is_parallel = True
+                elif ex == 0 and mx == 1 and edy == -1 and d == "D": is_parallel = True
+                
+                # 右の壁
+                elif ex == board.width - 1 and mx == board.width - 2 and edy == 1 and d == "U": is_parallel = True
+                elif ex == board.width - 1 and mx == board.width - 2 and edy == -1 and d == "D": is_parallel = True
+                
+                if is_parallel:
+                    scores[d] += W_PARALLEL
+
+        # 2. 強制ルート封鎖（特攻）
+        if forced_target:
+            # forced_target の「進行方向側の1つ先」の座標を計算
+            block_x = forced_target[0] + edx
+            block_y = forced_target[1] + edy
+            
+            #移動先が一致
+            if (mx, my) == (block_x, block_y):
+                scores[d] += W_BLOCK_PATH
 
     if scores:
         best_move = max(scores, key=scores.get)
